@@ -344,3 +344,23 @@ def get_encryption_lib_path():
         raise Exception(err)
 
     return lib_path
+
+import pprint
+import time
+
+class Timer():
+
+    def __init__(self, name):
+        self.times = [(name, time.time(), 0)]
+
+    def add(self, step):
+        t = time.time()
+        self.times.append( (step, t, round((t - self.times[-1][1]) * 1000)) )
+
+    def checkpoint(self, step):
+        t = time.time()
+        self.times.append( ('total @ ' + step, t, t - self.times[0][1]) )
+
+    def output(self):
+        self.checkpoint('end')
+        pprint.pprint(self.times)

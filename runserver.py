@@ -21,7 +21,7 @@ from pogom.app import Pogom
 from pogom.utils import get_args, insert_mock_data, get_encryption_lib_path
 
 from pogom.search import search_overseer_thread, fake_search_loop
-from pogom.models import init_database, create_tables, drop_tables
+from pogom.models import init_database, create_tables, drop_tables, db_updater
 
 # Currently supported pgoapi
 pgoapi_version = "1.1.7"
@@ -145,18 +145,30 @@ if __name__ == '__main__':
     new_location_queue = Queue()
     new_location_queue.put(position)
 
+    # DB Updates
+    db_updates_queue = Queue()
+
+    # WH Updates
+    wh_queue = Queue()
+
+    # Thread to process database updates
+    db_updater_thread = Thread(target=db_updater, args=(args, db_updates_queue))
+    db_updater_thread.daemon = True
+    db_updater_thread.name = 'db-updater'
+    db_updater_thread.start()
+
     if not args.only_server:
         # Gather the pokemons!
         if not args.mock:
             log.debug('Starting a real search thread')
-            search_thread = Thread(target=search_overseer_thread, args=(args, new_location_queue, pause_bit, encryption_lib_path))
+            search_thread = Thread(target=search_overseer_thread, args=(args, new_location_queue, pause_bit, encryption_lib_path, db_updates_queue, wh_queue))
         else:
             log.debug('Starting a fake search thread')
             insert_mock_data(position)
             search_thread = Thread(target=fake_search_loop)
 
         search_thread.daemon = True
-        search_thread.name = 'search_thread'
+        search_thread.name = 'search-overseer'
         search_thread.start()
 
     if args.cors:

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from base64 import b64encode
 
 from . import config
-from .utils import get_pokemon_name, get_pokemon_rarity, get_pokemon_types, get_args, send_to_webhook
+from .utils import get_pokemon_name, get_pokemon_rarity, get_pokemon_types, get_args, send_to_webhook, Timer
 from .transform import transform_from_wgs_to_gcj
 from .customLog import printPokemon
 
@@ -301,6 +301,7 @@ class Versions(flaskDb.Model):
         primary_key = False
 
 
+# todo: this probably shouldn't _really_ be in "models" anymore, but w/e
 def parse_map(map_dict, step_location):
     pokemons = {}
     pokestops = {}
@@ -325,18 +326,20 @@ def parse_map(map_dict, step_location):
                     'disappear_time': d_t
                 }
 
-                webhook_data = {
-                    'encounter_id': b64encode(str(p['encounter_id'])),
-                    'spawnpoint_id': p['spawn_point_id'],
-                    'pokemon_id': p['pokemon_data']['pokemon_id'],
-                    'latitude': p['latitude'],
-                    'longitude': p['longitude'],
-                    'disappear_time': calendar.timegm(d_t.timetuple()),
-                    'last_modified_time': p['last_modified_timestamp_ms'],
-                    'time_until_hidden_ms': p['time_till_hidden_ms']
-                }
+                # todo: setup a thread for webhook sending
+                #
+                # webhook_data = {
+                #     'encounter_id': b64encode(str(p['encounter_id'])),
+                #     'spawnpoint_id': p['spawn_point_id'],
+                #     'pokemon_id': p['pokemon_data']['pokemon_id'],
+                #     'latitude': p['latitude'],
+                #     'longitude': p['longitude'],
+                #     'disappear_time': calendar.timegm(d_t.timetuple()),
+                #     'last_modified_time': p['last_modified_timestamp_ms'],
+                #     'time_until_hidden_ms': p['time_till_hidden_ms']
+                # }
 
-                send_to_webhook('pokemon', webhook_data)
+                # send_to_webhook('pokemon', webhook_data)
 
         for f in cell.get('forts', []):
             if config['parse_pokestops'] and f.get('type') == 1:  # Pokestops
@@ -344,13 +347,13 @@ def parse_map(map_dict, step_location):
                     lure_expiration = datetime.utcfromtimestamp(
                         f['last_modified_timestamp_ms'] / 1000.0) + timedelta(minutes=30)
                     active_fort_modifier = f['active_fort_modifier']
-                    webhook_data = {
-                        'latitude': f['latitude'],
-                        'longitude': f['longitude'],
-                        'last_modified_time': f['last_modified_timestamp_ms'],
-                        'active_fort_modifier': active_fort_modifier
-                    }
-                    send_to_webhook('pokestop', webhook_data)
+                    # webhook_data = {
+                    #     'latitude': f['latitude'],
+                    #     'longitude': f['longitude'],
+                    #     'last_modified_time': f['last_modified_timestamp_ms'],
+                    #     'active_fort_modifier': active_fort_modifier
+                    # }
+                    # send_to_webhook('pokestop', webhook_data)
                 else:
                     lure_expiration, active_fort_modifier = None, None
 
@@ -378,47 +381,93 @@ def parse_map(map_dict, step_location):
                         f['last_modified_timestamp_ms'] / 1000.0),
                 }
 
-    pokemons_upserted = 0
-    pokestops_upserted = 0
-    gyms_upserted = 0
-
     scanned[0] = {
         'latitude': step_location[0],
         'longitude': step_location[1],
         'last_modified': datetime.utcnow(),
     }
 
+    return ( pokemons, pokestops, gyms, scanned )
+
+
+def db_updater(args, q):
+    # The forever loop
     while True:
         try:
-            flaskDb.connect_db()
-            break
+
+            # Loop the queue
+            while True:
+
+                pokemons, pokestops, gyms, scanned = q.get()
+
+                t = Timer('dbupdate')
+
+                # todo: I'm pretty sure that, since this is the only real db
+                #       interaction, we could open the connection outside
+                #       the loop and just keep it indefinitely (unless it
+                #       closes/etc). Reconnecting, essentially, if it bails
+                #       because the loop starts over.
+                #
+                #       However, with sqlite, on my machine, the `conn` step
+                #       is instant, so I'd need someone with mysql to see if
+                #       this matters.
+                while True:
+                    try:
+                        flaskDb.connect_db()
+                        break
+                    except Exception as e:
+                        log.warning('%s... Retrying', e)
+
+                t.add('conn')
+
+                pokemons_upserted = 0
+                pokestops_upserted = 0
+                gyms_upserted = 0
+
+                if pokemons and config['parse_pokemon']:
+                    pokemons_upserted = len(pokemons)
+                    bulk_upsert(Pokemon, pokemons)
+
+                t.add('pkmn')
+
+                if pokestops and config['parse_pokestops']:
+                    pokestops_upserted = len(pokestops)
+                    bulk_upsert(Pokestop, pokestops)
+
+                t.add('pkst')
+
+                if gyms and config['parse_gyms']:
+                    gyms_upserted = len(gyms)
+                    bulk_upsert(Gym, gyms)
+
+                t.add('gyms')
+
+                bulk_upsert(ScannedLocation, scanned)
+
+                t.add('scan')
+
+                # todo: bring this back somewhere; but not EVERY scan update. Maybe just every minute or so...
+                clean_database()
+
+                t.add('clen')
+
+                flaskDb.close_db(None)
+
+                t.add('clos')
+
+                if args.debug:
+                    t.output()
+
+                q.task_done()
+
+                log.info('Upserted %d pokemon, %d pokestops, and %d gyms (q remain: %d)',
+                         pokemons_upserted,
+                         pokestops_upserted,
+                         gyms_upserted,
+                         q.qsize())
+
         except Exception as e:
-            log.warning('%s... Retrying', e)
-
-    if pokemons and config['parse_pokemon']:
-        pokemons_upserted = len(pokemons)
-        bulk_upsert(Pokemon, pokemons)
-
-    if pokestops and config['parse_pokestops']:
-        pokestops_upserted = len(pokestops)
-        bulk_upsert(Pokestop, pokestops)
-
-    if gyms and config['parse_gyms']:
-        gyms_upserted = len(gyms)
-        bulk_upsert(Gym, gyms)
-
-    bulk_upsert(ScannedLocation, scanned)
-
-    clean_database()
-
-    flaskDb.close_db(None)
-
-    log.info('Upserted %d pokemon, %d pokestops, and %d gyms',
-             pokemons_upserted,
-             pokestops_upserted,
-             gyms_upserted)
-
-    return True
+            log.exception('Exception in db_updater: %s', e)
 
 
 def clean_database():

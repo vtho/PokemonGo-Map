@@ -30,6 +30,7 @@ from pgoapi import utilities as util
 from pgoapi.exceptions import AuthException
 
 from .models import parse_map
+from .utils import Timer
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ def fake_search_loop():
 
 
 # The main search loop that keeps an eye on the over all process
-def search_overseer_thread(args, new_location_queue, pause_bit, encryption_lib_path):
+def search_overseer_thread(args, new_location_queue, pause_bit, encryption_lib_path, db_updates_queue, wh_queue):
 
     log.info('Search overseer starting')
 
@@ -119,9 +120,9 @@ def search_overseer_thread(args, new_location_queue, pause_bit, encryption_lib_p
     for i, account in enumerate(args.accounts):
         log.debug('Starting search worker thread %d for user %s', i, account['username'])
         t = Thread(target=search_worker_thread,
-                   name='search_worker_{}'.format(i),
+                   name='search-worker-{}'.format(i),
                    args=(args, account, search_items_queue, parse_lock,
-                         encryption_lib_path))
+                         encryption_lib_path, db_updates_queue, wh_queue))
         t.daemon = True
         t.start()
 
@@ -174,7 +175,7 @@ def search_overseer_thread(args, new_location_queue, pause_bit, encryption_lib_p
         time.sleep(1)
 
 
-def search_worker_thread(args, account, search_items_queue, parse_lock, encryption_lib_path):
+def search_worker_thread(args, account, search_items_queue, parse_lock, encryption_lib_path, dbq, whq):
 
     # If we have more than one account, stagger the logins such that they occur evenly over scan_delay
     if len(args.accounts) > 1:
@@ -200,13 +201,19 @@ def search_worker_thread(args, account, search_items_queue, parse_lock, encrypti
             # The forever loop for the searches
             while True:
 
+                t = Timer('search')
+
                 # Grab the next thing to search (when available)
                 step, step_location = search_items_queue.get()
+
+                t.add('item')
 
                 log.info('Search step %d beginning (queue size is %d)', step, search_items_queue.qsize())
 
                 # Let the api know where we intend to be for this loop
                 api.set_position(*step_location)
+
+                t.add('setp')
 
                 # The loop to try very hard to scan this step
                 failed_total = 0
@@ -229,10 +236,16 @@ def search_worker_thread(args, account, search_items_queue, parse_lock, encrypti
                     # Ok, let's get started -- check our login status
                     check_login(args, account, api, step_location)
 
+                    t.add('login')
+
                     api.activate_signature(encryption_lib_path)
+
+                    t.add('sig')
 
                     # Make the actual request (finally!)
                     response_dict = map_request(api, step_location)
+
+                    t.add('request')
 
                     # G'damnit, nothing back. Mark it up, sleep, carry on
                     if not response_dict:
@@ -242,16 +255,30 @@ def search_worker_thread(args, account, search_items_queue, parse_lock, encrypti
                         continue
 
                     # Got the response, lock for parsing and do so (or fail, whatever)
-                    with parse_lock:
-                        try:
-                            parse_map(response_dict, step_location)
-                            log.debug('Search step %s completed', step)
-                            search_items_queue.task_done()
-                            break  # All done, get out of the request-retry loop
-                        except KeyError:
-                            log.exception('Search step %s map parsing failed, retrying request in %g seconds. Username: %s', step, sleep_time, account['username'])
-                            failed_total += 1
-                            time.sleep(sleep_time)
+                    # with parse_lock:
+                    #     t.add('lkaq')
+                    try:
+                        data = parse_map(response_dict, step_location)
+
+                        t.add('parse map')
+
+                        dbq.put(data)
+
+                        t.add('to db q')
+
+                        if args.webhooks:
+                            whq.put(data)
+                            t.add('to wh q')
+
+                        log.debug('Search step %s completed', step)
+                        search_items_queue.task_done()
+                        break  # All done, get out of the request-retry loop
+                    except KeyError:
+                        log.exception('Search step %s map parsing failed, retrying request in %g seconds. Username: %s', step, sleep_time, account['username'])
+                        failed_total += 1
+                        time.sleep(sleep_time)
+
+                t.checkpoint('search complete')
 
                 # If there's any time left between the start time and the time when we should be kicking off the next
                 # loop, hang out until its up.
@@ -260,6 +287,10 @@ def search_worker_thread(args, account, search_items_queue, parse_lock, encrypti
                     time.sleep(sleep_delay_remaining / 1000)
 
                 loop_start_time += args.scan_delay * 1000
+
+                t.add('delay')
+                if args.debug:
+                    t.output()
 
         # catch any process exceptions, log them, and continue the thread
         except Exception as e:
