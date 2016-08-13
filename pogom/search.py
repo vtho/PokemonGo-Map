@@ -195,6 +195,8 @@ def search_worker_thread(args, account, search_items_queue, parse_lock, encrypti
             if args.proxy:
                 api.set_proxy({'http': args.proxy, 'https': args.proxy})
 
+            api.activate_signature(encryption_lib_path)
+
             # Get current time
             loop_start_time = int(round(time.time() * 1000))
 
@@ -237,10 +239,6 @@ def search_worker_thread(args, account, search_items_queue, parse_lock, encrypti
                     check_login(args, account, api, step_location)
 
                     t.add('login')
-
-                    api.activate_signature(encryption_lib_path)
-
-                    t.add('sig')
 
                     # Make the actual request (finally!)
                     response_dict = map_request(api, step_location)
