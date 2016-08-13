@@ -390,86 +390,6 @@ def parse_map(map_dict, step_location):
     return ( pokemons, pokestops, gyms, scanned )
 
 
-def db_updater(args, q):
-    # The forever loop
-    while True:
-        try:
-
-            # Loop the queue
-            while True:
-
-                pokemons, pokestops, gyms, scanned = q.get()
-
-                t = Timer('dbupdate')
-
-                # todo: I'm pretty sure that, since this is the only real db
-                #       interaction, we could open the connection outside
-                #       the loop and just keep it indefinitely (unless it
-                #       closes/etc). Reconnecting, essentially, if it bails
-                #       because the loop starts over.
-                #
-                #       However, with sqlite, on my machine, the `conn` step
-                #       is instant, so I'd need someone with mysql to see if
-                #       this matters.
-                while True:
-                    try:
-                        flaskDb.connect_db()
-                        break
-                    except Exception as e:
-                        log.warning('%s... Retrying', e)
-
-                t.add('conn')
-
-                pokemons_upserted = 0
-                pokestops_upserted = 0
-                gyms_upserted = 0
-
-                if pokemons and config['parse_pokemon']:
-                    pokemons_upserted = len(pokemons)
-                    bulk_upsert(Pokemon, pokemons)
-
-                t.add('pkmn')
-
-                if pokestops and config['parse_pokestops']:
-                    pokestops_upserted = len(pokestops)
-                    bulk_upsert(Pokestop, pokestops)
-
-                t.add('pkst')
-
-                if gyms and config['parse_gyms']:
-                    gyms_upserted = len(gyms)
-                    bulk_upsert(Gym, gyms)
-
-                t.add('gyms')
-
-                bulk_upsert(ScannedLocation, scanned)
-
-                t.add('scan')
-
-                # todo: bring this back somewhere; but not EVERY scan update. Maybe just every minute or so...
-                clean_database()
-
-                t.add('clen')
-
-                flaskDb.close_db(None)
-
-                t.add('clos')
-
-                if args.debug:
-                    t.output()
-
-                q.task_done()
-
-                log.info('Upserted %d pokemon, %d pokestops, and %d gyms (q remain: %d)',
-                         pokemons_upserted,
-                         pokestops_upserted,
-                         gyms_upserted,
-                         q.qsize())
-
-        except Exception as e:
-            log.exception('Exception in db_updater: %s', e)
-
-
 def clean_database():
     query = (ScannedLocation
              .delete()
@@ -569,3 +489,83 @@ def database_migrate(db, old_ver):
 
     # Update database schema version
     Versions.update(val=db_schema_version).where(Versions.key == 'schema_version').execute()
+
+
+def db_updater(args, q):
+    # The forever loop
+    while True:
+        try:
+
+            # Loop the queue
+            while True:
+
+                pokemons, pokestops, gyms, scanned = q.get()
+
+                t = Timer('dbupdate')
+
+                # todo: I'm pretty sure that, since this is the only real db
+                #       interaction, we could open the connection outside
+                #       the loop and just keep it indefinitely (unless it
+                #       closes/etc). Reconnecting, essentially, if it bails
+                #       because the loop starts over.
+                #
+                #       However, with sqlite, on my machine, the `conn` step
+                #       is instant, so I'd need someone with mysql to see if
+                #       this matters.
+                while True:
+                    try:
+                        flaskDb.connect_db()
+                        break
+                    except Exception as e:
+                        log.warning('%s... Retrying', e)
+
+                t.add('conn')
+
+                pokemons_upserted = 0
+                pokestops_upserted = 0
+                gyms_upserted = 0
+
+                if pokemons and config['parse_pokemon']:
+                    pokemons_upserted = len(pokemons)
+                    bulk_upsert(Pokemon, pokemons)
+
+                t.add('pkmn')
+
+                if pokestops and config['parse_pokestops']:
+                    pokestops_upserted = len(pokestops)
+                    bulk_upsert(Pokestop, pokestops)
+
+                t.add('pkst')
+
+                if gyms and config['parse_gyms']:
+                    gyms_upserted = len(gyms)
+                    bulk_upsert(Gym, gyms)
+
+                t.add('gyms')
+
+                bulk_upsert(ScannedLocation, scanned)
+
+                t.add('scan')
+
+                # todo: bring this back somewhere; but not EVERY scan update. Maybe just every minute or so...
+                clean_database()
+
+                t.add('clen')
+
+                flaskDb.close_db(None)
+
+                t.add('clos')
+
+                if args.debug:
+                    t.output()
+
+                q.task_done()
+
+                log.info('Upserted %d pokemon, %d pokestops, and %d gyms (q remain: %d)',
+                         pokemons_upserted,
+                         pokestops_upserted,
+                         gyms_upserted,
+                         q.qsize())
+
+        except Exception as e:
+            log.exception('Exception in db_updater: %s', e)
